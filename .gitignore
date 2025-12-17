@@ -1,9 +1,6 @@
 # Python虚拟环境
 .venv/
 
-# iFlow相关文件
-.iflow/
-
 # Python编译缓存
 __pycache__/
 *.pyc
@@ -13,11 +10,10 @@ error_log.json
 paragraph_progress.json
 translate-checklist.md
 
-# 源文件目录
-source/
-
 # 输出目录（如果需要保留翻译结果可以注释掉）
 translated/
+
+source/
 
 # uv依赖锁文件
 uv.lock
