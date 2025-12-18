@@ -1367,6 +1367,32 @@ def update_file_content_by_type_incremental(
         if 'original-text' in original_block or 'translated-text' in original_block:
             print(f"  ⚠️ 警告: 原始块已包含翻译相关类，跳过处理")
             return current_content
+        
+        # 检查并添加CSS文件引用
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(current_content, 'html.parser')
+        
+        # 检查是否已经引用了bilingual.css
+        css_referenced = False
+        for link in soup.find_all('link', rel='stylesheet'):
+            if 'bilingual.css' in link.get('href', ''):
+                css_referenced = True
+                break
+        
+        if not css_referenced:
+            # 找到或创建head标签
+            head = soup.find('head')
+            if not head:
+                head = BeautifulSoup('<head></head>', 'html.parser').find('head')
+                html_tag = soup.find('html')
+                if html_tag:
+                    html_tag.insert(0, head)
+            
+            # 添加CSS引用
+            link_tag = BeautifulSoup('<link rel="stylesheet" type="text/css" href="bilingual.css">', 'html.parser').find('link')
+            head.append(link_tag)
+            print(f"  🔗 添加CSS文件引用: bilingual.css")
+            current_content = str(soup)
             
         # 对于HTML，先尝试直接替换
         if original_block in current_content:
@@ -1639,6 +1665,16 @@ async def main():
     progress_data["meta"]["total_blocks"] = total_blocks
     progress_data["meta"]["completed_blocks"] = completed_blocks
     progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    # 确保 bilingual.css 被复制到 OEBPS 目录
+    from pathlib import Path
+    import shutil
+    bilingual_css_source = Path("bilingual.css")
+    bilingual_css_dest = TRANSLATED_ROOT / "OEBPS" / "bilingual.css"
+    bilingual_css_dest.parent.mkdir(exist_ok=True)
+    if bilingual_css_source.exists():
+        shutil.copy2(bilingual_css_source, bilingual_css_dest)
+        print(f"📄 复制 bilingual.css 到: {bilingual_css_dest}")
     
     # 获取所有待翻译文件（递归遍历整个source目录）
     all_files = []    # 递归遍历整个 source/ 目录树
