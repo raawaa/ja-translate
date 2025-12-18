@@ -1351,6 +1351,7 @@ def update_file_content_by_type_incremental(
     Returns:
         更新后的文件内容
     """
+    import re
     if file_type == 'html':
         # 检查translated_block是否为None
         if translated_block is None:
@@ -1359,9 +1360,19 @@ def update_file_content_by_type_incremental(
             
         # 对于HTML，先尝试直接替换
         if original_block in current_content:
-            # 实现双语对照：保留原文，添加译文
-            bilingual_block = f'<div class="bilingual-container">{original_block}{translated_block}</div>'
-            print(f"  🔄 实现HTML双语对照: 替换原始块为双语块")
+            # 实现双语对照：保留原文，添加译文，并添加样式类区分
+            # 为原文添加 original-text 类
+            original_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', r'<\1\2 class="original-text">\3</\1>', original_block, flags=re.DOTALL | re.IGNORECASE)
+            if original_with_class == original_block:  # 如果没有匹配到标签
+                original_with_class = f'<div class="original-text">{original_block}</div>'
+            
+            # 为译文添加 translated-text 类
+            translated_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', r'<\1\2 class="translated-text">\3</\1>', translated_block, flags=re.DOTALL | re.IGNORECASE)
+            if translated_with_class == translated_block:  # 如果没有匹配到标签
+                translated_with_class = f'<div class="translated-text">{translated_block}</div>'
+            
+            bilingual_block = f'<div class="bilingual-container">{original_with_class}{translated_with_class}</div>'
+            print(f"  🔄 实现HTML双语对照: 替换原始块为双语块，添加样式区分")
             return current_content.replace(original_block, bilingual_block, 1)
         else:
             # 如果直接替换失败，尝试使用文本内容匹配
@@ -1395,7 +1406,21 @@ def update_file_content_by_type_incremental(
                             from bs4 import Tag
                             bilingual_container = Tag(name='div')
                             bilingual_container['class'] = ['bilingual-container']
-                            # 保留原文，添加译文
+                            # 保留原文，添加译文，并添加样式类区分
+                            # 为原文添加 original-text 类
+                            if 'class' in target_tag.attrs:
+                                if 'original-text' not in target_tag.attrs['class']:
+                                    target_tag.attrs['class'].append('original-text')
+                            else:
+                                target_tag.attrs['class'] = ['original-text']
+                            
+                            # 为译文添加 translated-text 类
+                            if 'class' in trans_tag.attrs:
+                                if 'translated-text' not in trans_tag.attrs['class']:
+                                    trans_tag.attrs['class'].append('translated-text')
+                            else:
+                                trans_tag.attrs['class'] = ['translated-text']
+                            
                             bilingual_container.append(target_tag)
                             bilingual_container.append(trans_tag)
                             # 替换原标签为双语对照容器
