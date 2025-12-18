@@ -216,9 +216,16 @@ class IFlowConnectionManager:
         
         self.logger.info("iFlow连接已断开")
     
-    
-    
-    
+    async def reset_session(self):
+        """重置会话，重新创建IFlowClient实例"""
+        self.logger.info("重置iFlow会话...")
+        
+        # 断开当前连接
+        await self.disconnect()
+        
+        # 立即重新建立连接，不等待
+        await self.connect()
+        self.logger.info("iFlow会话已重置")
     
     async def _reconnect(self):
         """重新连接"""
@@ -1069,6 +1076,9 @@ async def translate_block(
 
     for attempt in range(max_retries):
         try:
+            # 关键修改：每次翻译前重置会话
+            await connection_manager.reset_session()
+            
             # 显示要翻译的内容预览
             preview = re.sub(r'<[^>]+>', '', current_block)[:50]
             print(f"  📋 发送翻译请求 (尝试 {attempt+1}/{max_retries})")
