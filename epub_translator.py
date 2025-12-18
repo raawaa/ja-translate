@@ -1040,6 +1040,20 @@ async def translate_block(
     """
     翻译单个 HTML 块（使用连接管理器）
     """
+    # 关键修改：提取原块的 HTML 标签结构
+    original_tag = ""
+    tag_name = ""
+    content_inside_tag = ""
+    
+    # 使用正则表达式提取标签和内容
+    tag_match = re.match(r'<([a-z0-9]+)([^>]*)>(.*)</\1>$', current_block, re.DOTALL | re.IGNORECASE)
+    if tag_match:
+        tag_name = tag_match.group(1).lower()  # 标签名称
+        tag_attributes = tag_match.group(2)  # 标签属性
+        original_tag = f"<{tag_name}{tag_attributes}>"  # 完整的开始标签
+        closing_tag = f"</{tag_name}>"  # 结束标签
+        content_inside_tag = tag_match.group(3)  # 标签内的内容
+    
     # 构建术语提示
     glossary_text = ""
     if glossary:
@@ -1197,9 +1211,23 @@ async def translate_block(
 
 
 
-            # 基础验证
-            if not response or "<" not in response:
-                print(f"  ⚠️ 警告: 翻译结果无效 - 长度: {len(response) if response else 0}, 包含HTML: {'<' in response if response else False}")
+            # 关键修改：处理纯文本翻译结果
+            if response and "<" not in response:
+                print(f"  ⚠️ 警告: 翻译结果是纯文本，自动包装HTML标签")
+                print(f"  📝 原始响应内容: {repr(response[:100])}")
+                
+                # 如果提取到了原块标签，使用原标签包装
+                if original_tag and tag_name:
+                    response = f"{original_tag}{response}{closing_tag}"
+                    print(f"  ✅ 使用原块标签包装: {original_tag.strip()}")
+                else:
+                    # 默认使用<p>标签包装
+                    response = f"<p>{response}</p>"
+                    print(f"  ✅ 使用默认<p>标签包装")
+            
+            # 优化后的基础验证
+            if not response:
+                print(f"  ⚠️ 警告: 翻译结果无效 - 长度: {len(response) if response else 0}")
                 print(f"  📝 原始响应内容: {repr(response[:100]) if response else 'None'}")
                 # 返回原始内容而不是抛出异常，避免程序崩溃
                 return f"<!-- 翻译失败: 无效翻译结果 -->"
