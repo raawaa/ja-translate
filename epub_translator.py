@@ -1725,6 +1725,7 @@ async def main():
     connection_manager = None
     
     # 主循环：处理所有文件，支持连接管理器自动重建
+    all_files_completed = False
     while True:
         try:
             # 如果连接管理器不存在或未连接，创建新的连接管理器
@@ -1735,7 +1736,7 @@ async def main():
                     timeout=IFLOW_TIMEOUT,
                     logger=enhanced_logger
                 )
-                print("� 已连接到 iFlow 服务")
+                print("🔌 已连接到 iFlow 服务")
             
             for file_idx, filename in enumerate(all_files, 1):
                 file_type = get_file_type(filename)
@@ -2015,7 +2016,12 @@ async def main():
                 if len(completed_files) == len(all_files):
                     print("\n🎉 所有文件处理完毕！")
                     print(f"输出目录: {TRANSLATED_ROOT.absolute()}")
-                    break  # 所有文件处理完毕，退出循环
+                    all_files_completed = True
+                    break
+            
+            # 如果所有文件已完成，退出外层循环
+            if all_files_completed:
+                break
         except (SDKTimeoutError, ConnectionError) as e:
             # 处理连接错误，需要重建连接管理器
             print(f"  🚨 连接失败，尝试重建连接管理器: {e}")
