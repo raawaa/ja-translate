@@ -9,7 +9,7 @@ dependencies = [
     "psutil>=5.8.0",
     "python-dotenv>=1.0.0",
 ]
-readme = "IFLOW.md"
+readme = "README.md"
 requires-python = ">=3.8"
 
 [project.scripts]
