@@ -101,6 +101,37 @@ class IFlowConnectionManager:
             logger.setLevel(logging.INFO)
         return logger
     
+    async def _check_and_restart_iflow_process(self):
+        """检查并重启iFlow进程"""
+        import subprocess
+        import re
+        
+        try:
+            # 检查是否有iFlow进程在运行
+            result = subprocess.run(
+                ["lsof", "-i", ":8090"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                # 找到进程，尝试杀死
+                self.logger.warning("检测到iFlow进程仍在运行，尝试重启...")
+                
+                # 提取PID并杀死进程
+                pid_match = re.search(r'\d+', result.stdout)
+                if pid_match:
+                    pid = int(pid_match.group())
+                    subprocess.run(["kill", "-9", str(pid)], check=True)
+                    self.logger.info(f"已杀死iFlow进程 (PID: {pid})")
+                    await asyncio.sleep(2)  # 等待进程完全退出
+            
+            self.logger.info("iFlow进程重启准备完成")
+        except Exception as e:
+            self.logger.error(f"重启iFlow进程时出错: {e}")
+            # 忽略错误，继续尝试连接
+            pass
+    
     async def connect(self):
         """建立iFlow连接"""
         from iflow_sdk import IFlowOptions
@@ -121,13 +152,18 @@ class IFlowConnectionManager:
             try:
                 self.logger.info(f"尝试建立iFlow连接 (第 {attempt + 1}/{self.max_reconnect_attempts} 次)")
                 
+                # 在第一次尝试或后续失败时检查并重启iFlow进程
+                if attempt > 0:
+                    await self._check_and_restart_iflow_process()
+                
                 # 配置选项，启用详细日志 - 按照iFlow CLI SDK文档
                 options = IFlowOptions(
                     timeout=self.timeout,
                     log_level="DEBUG",
                     url=url if url else "ws://localhost:8090/acp",
                     auth_method_id="iflow",
-                    auth_method_info={"api_key": api_key}
+                    auth_method_info={"api_key": api_key},
+                    auto_start_process=True  # 启用自动进程管理
                 )
                 
                 # 调试信息：显示IFlow配置（隐藏API Key部分内容）
@@ -325,10 +361,38 @@ class ResourceMonitor:
         collected = gc.collect()
         self.logger.info(f"垃圾回收完成，回收了 {collected} 个对象")
     
+    async def _check_iflow_process(self):
+        """检查iFlow进程状态"""
+        import subprocess
+        try:
+            # 检查iFlow进程是否在运行
+            result = subprocess.run(
+                ["lsof", "-i", ":8090"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                # iFlow进程在运行
+                pid_match = result.stdout.split()[1] if len(result.stdout.split()) > 1 else "unknown"
+                self.logger.debug(f"iFlow进程正在运行 (PID: {pid_match})")
+                return True
+            else:
+                # iFlow进程未在运行
+                self.logger.warning("检测到iFlow进程未运行")
+                return False
+        except Exception as e:
+            self.logger.error(f"检查iFlow进程状态时出错: {e}")
+            return False
+    
     async def _monitor_loop(self):
         """监控循环"""
         while self.monitoring:
             try:
+                # 检查iFlow进程状态
+                await self._check_iflow_process()
+                
+                # 检查内存使用情况
                 memory_info = self.get_memory_usage()
                 if memory_info:
                     self.memory_history.append(memory_info)
@@ -1142,6 +1206,20 @@ async def translate_block(
             print(f"  ⏱️ 已等待时间: {elapsed:.1f}秒")
             print(f"  📨 已接收消息: {msg_count}条")
             
+            # 特殊处理超时错误和连接错误
+            if isinstance(e, SDKTimeoutError) or isinstance(e, ConnectionError) or "timeout" in str(e).lower():
+                print(f"  🚨 检测到超时或连接错误，尝试重启iFlow进程...")
+                try:
+                    # 断开当前连接
+                    await connection_manager.disconnect()
+                    # 重启iFlow进程
+                    await connection_manager._check_and_restart_iflow_process()
+                    # 重新建立连接
+                    await connection_manager.connect()
+                    print(f"  ✅ iFlow进程重启成功")
+                except Exception as restart_e:
+                    print(f"  ⚠️ 重启iFlow进程时出错: {restart_e}")
+            
             # 特殊处理iFlow内部错误
             if "operation was aborted" in str(e).lower() or "internal error" in str(e).lower():
                 print(f"  🚨 检测到iFlow服务端内部错误，可能需要重启服务或稍后重试")
@@ -1414,6 +1492,60 @@ async def main():
         print("❌ 未找到 source/ 目录中的文件，请检查路径")
         return
     
+    # 检查是否需要预生成进度数据（文件存在且有内容时直接使用）
+    progress_file_exists = os.path.exists(PROGRESS_FILE) and os.path.getsize(PROGRESS_FILE) > 0
+    
+    # 如果进度文件不存在或数据为空，预扫描所有文件生成完整进度数据
+    if not progress_file_exists or (not progress_data["files"] and all_files):
+        print("🔍 预扫描所有文件，生成完整进度数据...")
+        
+        # 初始化变量
+        total_blocks = 0
+        completed_files = set()
+        
+        for filename in all_files:
+            file_type = get_file_type(filename)
+            source_path = SOURCE_ROOT / filename
+            
+            # 初始化文件进度
+            if filename not in progress_data["files"]:
+                progress_data["files"][filename] = {
+                    "type": file_type,
+                    "total_blocks": 0,
+                    "completed_blocks": 0,
+                    "completed": [],
+                    "failed": [],
+                    "current_position": 0,
+                    "is_completed": False
+                }
+                progress_data["meta"]["total_files"] += 1
+            
+            # 对于可翻译的文件，预提取块数
+            if file_type in ['html', 'ncx', 'opf'] and source_path.exists():
+                try:
+                    original_content = source_path.read_text(encoding='utf-8')
+                    blocks = extract_translatable_blocks_by_type(original_content, file_type)
+                    
+                    # 更新文件总块数
+                    file_total_blocks = len(blocks)
+                    progress_data["files"][filename]["total_blocks"] = file_total_blocks
+                    total_blocks += file_total_blocks
+                except Exception as e:
+                    print(f"  ⚠️ 预扫描文件 {filename} 时出错: {str(e)}")
+                    continue
+            else:
+                # 非文本文件默认完成
+                progress_data["files"][filename]["is_completed"] = True
+                completed_files.add(filename)
+        
+        # 更新总块数
+        progress_data["meta"]["total_blocks"] = total_blocks
+        progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # 保存预生成的进度数据
+        save_json(progress_data, PROGRESS_FILE)
+        print("✅ 预扫描完成，进度数据已保存")
+    
     # 从进度数据中构建completed_files集合
     completed_files = set()
     if progress_data and 'files' in progress_data:
@@ -1426,388 +1558,355 @@ async def main():
     
 
 
-    # 创建 IFlowConnectionManager 并使用重试机制处理连接问题
-    connection_manager = await create_connection_manager_with_retry(
-        max_retries=5, 
-        delay=3, 
-        timeout=IFLOW_TIMEOUT,
-        logger=enhanced_logger
-    )
+    # 创建连接管理器并处理连接问题
+    connection_manager = None
     
-    try:
-        print("🔗 已连接到 iFlow 服务")
-        
-        # 动态获取客户端配置信息
+    # 主循环：处理所有文件，支持连接管理器自动重建
+    while True:
         try:
-            # 获取客户端配置信息
-            if hasattr(client, 'options') and client.options:
-                options = client.options
-                url = getattr(options, 'url', 'Unknown')
-                timeout = getattr(options, 'timeout', 'Unknown')
-                log_level = getattr(options, 'log_level', 'Unknown')
-                print(f"📊 连接配置: URL={url}, 超时={timeout}s, 日志级别={log_level}")
-                
-                # 检查是否有 MCP 服务器配置
-                if hasattr(options, 'mcp_servers') and options.mcp_servers:
-                    print(f"🔧 MCP 服务器: {len(options.mcp_servers)} 个已配置")
-                    for server in options.mcp_servers:
-                        server_name = server.get('name', 'Unknown') if isinstance(server, dict) else str(server)
-                        print(f"     - {server_name}")
-                else:
-                    print("🔧 MCP 服务器: 无额外配置")
-            else:
-                print("📊 配置信息: 使用默认配置")
-        except Exception as e:
-            print(f"📊 配置信息: 获取失败 - {str(e)}")
-        print("🔗 已连接到 iFlow 服务")
-        
-        # 动态获取客户端配置信息
-        try:
-            # 获取客户端配置信息
-            if hasattr(client, 'options') and client.options:
-                options = client.options
-                url = getattr(options, 'url', 'Unknown')
-                timeout = getattr(options, 'timeout', 'Unknown')
-                log_level = getattr(options, 'log_level', 'Unknown')
-                print(f"📊 连接配置: URL={url}, 超时={timeout}s, 日志级别={log_level}")
-                
-                # 检查是否有 MCP 服务器配置
-                if hasattr(options, 'mcp_servers') and options.mcp_servers:
-                    print(f"🔧 MCP 服务器: {len(options.mcp_servers)} 个已配置")
-                    for server in options.mcp_servers:
-                        server_name = server.get('name', 'Unknown') if isinstance(server, dict) else str(server)
-                        print(f"     - {server_name}")
-                else:
-                    print("🔧 MCP 服务器: 无额外配置")
-            else:
-                print("📊 配置信息: 使用默认配置")
-        except Exception as e:
-            print(f"📊 配置信息: 获取失败 - {str(e)}")
-        
-        for file_idx, filename in enumerate(all_files, 1):
-            file_type = get_file_type(filename)
-            print(f"\n{'='*60}")
-            print(f"📄 处理文件 [{file_idx}/{len(all_files)}]: {filename}")
-            print(f"📋 文件类型: {file_type}")
-            print(f"📊 总体进度: {len(completed_files)}/{len(all_files)} 文件已完成 ({len(completed_files)/len(all_files)*100:.1f}%)")
-            print(f"⏰ 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            file_key = filename
-
-            # 构建源路径和目标路径
-            source_path = SOURCE_ROOT / filename
-            dest_path = TRANSLATED_ROOT / filename
-
-            # 确保目标目录存在
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if not source_path.exists():
-                print(f"  ⚠️ 文件不存在，跳过")
-                continue
+            # 如果连接管理器不存在或未连接，创建新的连接管理器
+            if not connection_manager or not connection_manager.is_connected:
+                connection_manager = await create_connection_manager_with_retry(
+                    max_retries=5, 
+                    delay=3, 
+                    timeout=IFLOW_TIMEOUT,
+                    logger=enhanced_logger
+                )
+                print("� 已连接到 iFlow 服务")
             
-            # 显示文件大小
-            file_size = source_path.stat().st_size
-            print(f"📦 文件大小: {file_size:,} 字节 ({file_size/1024:.1f} KB)")
+            for file_idx, filename in enumerate(all_files, 1):
+                file_type = get_file_type(filename)
+                print(f"\n{'='*60}")
+                print(f"📄 处理文件 [{file_idx}/{len(all_files)}]: {filename}")
+                print(f"📋 文件类型: {file_type}")
+                print(f"📊 总体进度: {len(completed_files)}/{len(all_files)} 文件已完成 ({len(completed_files)/len(all_files)*100:.1f}%)")
+                print(f"⏰ 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                file_key = filename
 
-            # 初始化进度数据结构
-            if not progress_data:
-                progress_data = {
-                    "meta": {
-                        "total_files": 0,
-                        "completed_files": 0,
+                # 构建源路径和目标路径
+                source_path = SOURCE_ROOT / filename
+                dest_path = TRANSLATED_ROOT / filename
+
+                # 确保目标目录存在
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+                if not source_path.exists():
+                    print(f"  ⚠️ 文件不存在，跳过")
+                    continue
+                
+                # 显示文件大小
+                file_size = source_path.stat().st_size
+                print(f"📦 文件大小: {file_size:,} 字节 ({file_size/1024:.1f} KB)")
+
+                # 确保文件进度数据存在（防止预扫描时遗漏某些文件）
+                if file_key not in progress_data["files"]:
+                    print(f"  ⚠️ 文件 {file_key} 不在进度数据中，重新初始化")
+                    progress_data["files"][file_key] = {
+                        "type": file_type,
                         "total_blocks": 0,
                         "completed_blocks": 0,
-                        "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    },
-                    "files": {}
-                }
-            
-            # 初始化文件进度
-            if file_key not in progress_data["files"]:
-                progress_data["files"][file_key] = {
-                    "type": file_type,
-                    "total_blocks": 0,
-                    "completed_blocks": 0,
-                    "completed": [],
-                    "failed": [],
-                    "current_position": 0,
-                    "is_completed": False
-                }
-                progress_data["meta"]["total_files"] += 1
+                        "completed": [],
+                        "failed": [],
+                        "current_position": 0,
+                        "is_completed": False
+                    }
+                    progress_data["meta"]["total_files"] += 1
 
-            # 根据文件类型决定如何处理
-            if file_type in ['html', 'ncx', 'opf']:
-                # 可翻译的文本文件
-                original_content = source_path.read_text(encoding='utf-8')
-                
-                # 根据文件类型提取可翻译块
-                blocks = extract_translatable_blocks_by_type(original_content, file_type)
-                
-                # 更新总块数（如果有变化）
-                if progress_data["files"][file_key]["total_blocks"] != len(blocks):
-                    # 计算块数变化
-                    old_total = progress_data["files"][file_key]["total_blocks"]
-                    progress_data["files"][file_key]["total_blocks"] = len(blocks)
-                    progress_data["meta"]["total_blocks"] += (len(blocks) - old_total)
-
-                # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
-                completed_blocks = len(progress_data["files"][file_key]["completed"])
-                if dest_path.exists() and completed_blocks > 0:
-                    print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
-                    translated_content = dest_path.read_text(encoding='utf-8')
+                # 根据文件类型决定如何处理
+                if file_type in ['html', 'ncx', 'opf']:
+                    # 可翻译的文本文件
+                    original_content = source_path.read_text(encoding='utf-8')
                     
-                    # 验证已翻译文件是否真的包含翻译内容
-                    sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
-                    if sample_jp_check:
-                        print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
-                        # 可以选择从原文重新开始，或继续尝试恢复
-                        # 这里选择继续，但会在后续翻译中覆盖日文部分
+                    # 根据文件类型提取可翻译块
+                    blocks = extract_translatable_blocks_by_type(original_content, file_type)
                     
-                    # 初始化translated_blocks数组
-                    translated_blocks = [""] * len(blocks)
-                    
-                    # 对于已完成的块，保持为空字符串（会在增量更新时从文件中读取）
-                    # 对于未完成的块，也保持为空字符串
-                    print(f"  📋 已完成 {completed_blocks} 个块，将在翻译时逐个更新")
-                else:
-                    print(f"  🆕 首次翻译此文件")
-                    translated_content = original_content
-                    translated_blocks = [""] * len(blocks)
+                    # 更新总块数（如果有变化）
+                    current_total_blocks = progress_data["files"][file_key]["total_blocks"]
+                    if current_total_blocks == 0 or current_total_blocks != len(blocks):
+                        # 计算块数变化
+                        old_total = current_total_blocks
+                        progress_data["files"][file_key]["total_blocks"] = len(blocks)
+                        progress_data["meta"]["total_blocks"] += (len(blocks) - old_total)
+                        print(f"  🔄 更新文件块数: {old_total} → {len(blocks)}")
 
-                # 如果有需要翻译的块，则进行翻译
-                if len(blocks) > 0:
-                    # 逐块处理
-                    block_start_time = time.time()
-                    for i, block in enumerate(blocks):
-                        if i in progress_data["files"][file_key]["completed"]:
-                            print(f"  ✅ 跳过已翻译块 {i+1}/{len(blocks)}")
-                            # 如果块已翻译，从文件中恢复已翻译的块内容
-                            translated_blocks[i] = block
-                            continue
-
-                        # 计算进度和预计时间
-                        completed_count = len(progress_data["files"][file_key]["completed"])
-                        remaining = len(blocks) - completed_count
-                        if completed_count > 0:
-                            elapsed = time.time() - block_start_time
-                            avg_time = elapsed / completed_count
-                            eta_seconds = avg_time * remaining
-                            eta_str = f"{int(eta_seconds//60)}分{int(eta_seconds%60)}秒"
-                        else:
-                            eta_str = "计算中..."
+                    # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
+                    completed_blocks = len(progress_data["files"][file_key]["completed"])
+                    if dest_path.exists() and completed_blocks > 0:
+                        print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
+                        translated_content = dest_path.read_text(encoding='utf-8')
                         
-                        print(f"\n  {'─'*50}")
-                        print(f"  🔤 翻译块 [{i+1}/{len(blocks)}] (剩余 {remaining} 块)")
-                        print(f"  ⏱️ 预计剩余时间: {eta_str}")
+                        # 验证已翻译文件是否真的包含翻译内容
+                        sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
+                        if sample_jp_check:
+                            print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
+                            # 可以选择从原文重新开始，或继续尝试恢复
+                            # 这里选择继续，但会在后续翻译中覆盖日文部分
                         
-                        # 显示块内容预览
-                        block_preview = re.sub(r'<[^>]+>', '', block)[:80]
-                        print(f"  📝 内容预览: {block_preview}...")
-                        print(f"  📏 块长度: {len(block)} 字符")
-
-                        # 准备上下文
-                        prev_blk, curr_blk, next_blk = build_context(blocks, i)
-
-                        # 调用翻译
-                        translate_start = time.time()
-                        translated_block = await translate_block(
-                            connection_manager, curr_blk, prev_blk, next_blk, glossary
-                        )
-                        translate_duration = time.time() - translate_start
-                        print(f"  ⏱️ 翻译耗时: {translate_duration:.1f}秒")
-
-                        # 存储翻译后的块
-                        translated_blocks[i] = translated_block
-
-                        # 检查翻译结果是否有效
-                        if translated_block is None:
-                            print(f"  ⚠️ 警告: 第{i+1}块翻译结果为None")
-                            print(f"  🛑 程序将退出，不再继续翻译")
-                            raise Exception(f"翻译失败: 第{i+1}块翻译结果为None")
+                        # 初始化translated_blocks数组
+                        translated_blocks = [""] * len(blocks)
                         
-                        # 检查是否是翻译失败的注释
-                        if "TRANSLATION_FAILED" in translated_block or "翻译失败" in translated_block:
-                            print(f"  ⚠️ 警告: 第{i+1}块翻译失败")
-                            print(f"  🛑 程序将退出，不再继续翻译")
-                            raise Exception(f"翻译失败: 第{i+1}块翻译失败")
+                        # 对于已完成的块，保持为空字符串（会在增量更新时从文件中读取）
+                        # 对于未完成的块，也保持为空字符串
+                        print(f"  📋 已完成 {completed_blocks} 个块，将在翻译时逐个更新")
+                    else:
+                        print(f"  🆕 首次翻译此文件")
+                        translated_content = original_content
+                        translated_blocks = [""] * len(blocks)
 
-                        # 增量更新：只更新当前翻译的块
-                        if dest_path.exists():
-                            # 从已翻译的文件中读取当前内容
-                            current_content = dest_path.read_text(encoding='utf-8')
-                        else:
-                            # 如果文件不存在，使用原始内容
-                            current_content = original_content
-                        
-                        # 使用增量更新函数只替换当前块
-                        updated_content = update_file_content_by_type_incremental(
-                            current_content, file_type, blocks[i], translated_block, i
-                        )
+                    # 如果有需要翻译的块，则进行翻译
+                    if len(blocks) > 0:
+                        # 逐块处理
+                        block_start_time = time.time()
+                        for i, block in enumerate(blocks):
+                            if i in progress_data["files"][file_key]["completed"]:
+                                print(f"  ✅ 跳过已翻译块 {i+1}/{len(blocks)}")
+                                # 如果块已翻译，从文件中恢复已翻译的块内容
+                                translated_blocks[i] = block
+                                continue
 
-                        # 立即写入文件（现在只写入更新后的内容）
-                        try:
-                            # 创建备份（如果原文件存在）
-                            backup_path = dest_path.with_suffix(dest_path.suffix + '.backup')
-                            if dest_path.exists():
-                                import shutil
-                                shutil.copy2(dest_path, backup_path)
-                            
-                            # 写入更新后的内容
-                            dest_path.write_text(updated_content, encoding='utf-8')
-                            
-                            # 验证写入是否成功
-                            written_content = dest_path.read_text(encoding='utf-8')
-                            if len(written_content) == 0:
-                                raise IOError("写入的文件为空")
-                            
-                            # 更新内存中的内容，用于后续处理
-                            translated_content = updated_content
-                            
-                            # 删除备份文件（写入成功）
-                            if backup_path.exists():
-                                backup_path.unlink()
-                            
-                        except Exception as write_error:
-                            print(f"  ❌ 文件写入失败: {str(write_error)}")
-                            print(f"  🔄 尝试恢复...")
-                            
-                            # 如果有备份，恢复备份
-                            if 'backup_path' in locals() and backup_path.exists():
-                                import shutil
-                                shutil.copy2(backup_path, dest_path)
-                                backup_path.unlink()
-                                print(f"  ✅ 已从备份恢复")
+                            # 计算进度和预计时间
+                            completed_count = len(progress_data["files"][file_key]["completed"])
+                            remaining = len(blocks) - completed_count
+                            if completed_count > 0:
+                                elapsed = time.time() - block_start_time
+                                avg_time = elapsed / completed_count
+                                eta_seconds = avg_time * remaining
+                                eta_str = f"{int(eta_seconds//60)}分{int(eta_seconds%60)}秒"
                             else:
-                                print(f"  ⚠️ 无法恢复，没有可用的备份")
+                                eta_str = "计算中..."
                             
-                            # 记录错误
-                            error_log["errors"].append({
-                                "file": filename,
-                                "block": i,
-                                "error": f"文件写入失败: {str(write_error)}",
-                                "content": translated_block
-                            })
-                            save_json(error_log, ERROR_LOG_FILE)
+                            print(f"\n  {'─'*50}")
+                            print(f"  🔤 翻译块 [{i+1}/{len(blocks)}] (剩余 {remaining} 块)")
+                            print(f"  ⏱️ 预计剩余时间: {eta_str}")
                             
-                            # 跳过当前块的进度更新，但继续翻译下一个块
-                            print(f"  ⏭️ 跳过块 {i} 的进度更新，继续下一个块")
-                            continue
-                        
-                        # 质量检查（只有写入成功后才执行）
-                        if contains_japanese(translated_block):
-                            err_msg = f"块 {i} 仍含日文字符"
-                            print(f"  ❌ {err_msg}")
-                            error_log["errors"].append({
-                                "file": filename,
-                                "block": i,
-                                "error": err_msg,
-                                "content": translated_block
-                            })
-                            save_json(error_log, ERROR_LOG_FILE)
+                            # 显示块内容预览
+                            block_preview = re.sub(r'<[^>]+>', '', block)[:80]
+                            print(f"  📝 内容预览: {block_preview}...")
+                            print(f"  📏 块长度: {len(block)} 字符")
 
-                        if not check_chinese_punctuation(translated_block):
-                            print(f"  ⚠️ 块 {i} 可能使用了日文标点")
+                            # 准备上下文
+                            prev_blk, curr_blk, next_blk = build_context(blocks, i)
 
-                        # 文件写入成功后，再更新进度（确保进度与文件状态同步）
-                        file_progress = progress_data["files"][file_key]
-                        
-                        # 只在块未标记为完成时添加
-                        if i not in file_progress["completed"]:
-                            file_progress["completed"].append(i)
-                            file_progress["completed_blocks"] += 1
-                            progress_data["meta"]["completed_blocks"] += 1
-                        
-                        file_progress["current_position"] = i
-                        
-                        # 检查文件是否已完成
-                        total_blocks = file_progress["total_blocks"]
-                        if total_blocks > 0:
-                            file_progress["is_completed"] = (file_progress["completed_blocks"] == total_blocks)
-                        else:
-                            file_progress["is_completed"] = True
-                        
-                        # 更新元数据中的完成文件计数
-                        if file_progress["is_completed"] and file_key not in completed_files:
-                            progress_data["meta"]["completed_files"] += 1
-                        
-                        # 更新最后修改时间
-                        progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        
-                        # 保存进度数据
-                        save_json(progress_data, PROGRESS_FILE)
+                            # 调用翻译
+                            translate_start = time.time()
+                            translated_block = await translate_block(
+                                connection_manager, curr_blk, prev_blk, next_blk, glossary
+                            )
+                            translate_duration = time.time() - translate_start
+                            print(f"  ⏱️ 翻译耗时: {translate_duration:.1f}秒")
 
-                        print(f"  💾 已保存 {filename}（进度 {i+1}/{len(blocks)}）")
+                            # 存储翻译后的块
+                            translated_blocks[i] = translated_block
+
+                            # 检查翻译结果是否有效
+                            if translated_block is None:
+                                print(f"  ⚠️ 警告: 第{i+1}块翻译结果为None")
+                                print(f"  🛑 程序将退出，不再继续翻译")
+                                raise Exception(f"翻译失败: 第{i+1}块翻译结果为None")
+                            
+                            # 检查是否是翻译失败的注释
+                            if "TRANSLATION_FAILED" in translated_block or "翻译失败" in translated_block:
+                                print(f"  ⚠️ 警告: 第{i+1}块翻译失败")
+                                print(f"  🛑 程序将退出，不再继续翻译")
+                                raise Exception(f"翻译失败: 第{i+1}块翻译失败")
+
+                            # 增量更新：只更新当前翻译的块
+                            if dest_path.exists():
+                                # 从已翻译的文件中读取当前内容
+                                current_content = dest_path.read_text(encoding='utf-8')
+                            else:
+                                # 如果文件不存在，使用原始内容
+                                current_content = original_content
+                            
+                            # 使用增量更新函数只替换当前块
+                            updated_content = update_file_content_by_type_incremental(
+                                current_content, file_type, blocks[i], translated_block, i
+                            )
+
+                            # 立即写入文件（现在只写入更新后的内容）
+                            try:
+                                # 创建备份（如果原文件存在）
+                                backup_path = dest_path.with_suffix(dest_path.suffix + '.backup')
+                                if dest_path.exists():
+                                    import shutil
+                                    shutil.copy2(dest_path, backup_path)
+                                
+                                # 写入更新后的内容
+                                dest_path.write_text(updated_content, encoding='utf-8')
+                                
+                                # 验证写入是否成功
+                                written_content = dest_path.read_text(encoding='utf-8')
+                                if len(written_content) == 0:
+                                    raise IOError("写入的文件为空")
+                                
+                                # 更新内存中的内容，用于后续处理
+                                translated_content = updated_content
+                                
+                                # 删除备份文件（写入成功）
+                                if backup_path.exists():
+                                    backup_path.unlink()
+                                
+                            except Exception as write_error:
+                                print(f"  ❌ 文件写入失败: {str(write_error)}")
+                                print(f"  🔄 尝试恢复...")
+                                
+                                # 如果有备份，恢复备份
+                                if 'backup_path' in locals() and backup_path.exists():
+                                    import shutil
+                                    shutil.copy2(backup_path, dest_path)
+                                    backup_path.unlink()
+                                    print(f"  ✅ 已从备份恢复")
+                                else:
+                                    print(f"  ⚠️ 无法恢复，没有可用的备份")
+                                
+                                # 记录错误
+                                error_log["errors"].append({
+                                    "file": filename,
+                                    "block": i,
+                                    "error": f"文件写入失败: {str(write_error)}",
+                                    "content": translated_block
+                                })
+                                save_json(error_log, ERROR_LOG_FILE)
+                                
+                                # 跳过当前块的进度更新，但继续翻译下一个块
+                                print(f"  ⏱️ 跳过块 {i} 的进度更新，继续下一个块")
+                                continue
+                            
+                            # 质量检查（只有写入成功后才执行）
+                            if contains_japanese(translated_block):
+                                err_msg = f"块 {i} 仍含日文字符"
+                                print(f"  ❌ {err_msg}")
+                                error_log["errors"].append({
+                                    "file": filename,
+                                    "block": i,
+                                    "error": err_msg,
+                                    "content": translated_block
+                                })
+                                save_json(error_log, ERROR_LOG_FILE)
+
+                            if not check_chinese_punctuation(translated_block):
+                                print(f"  ⚠️ 块 {i} 可能使用了日文标点")
+
+                            # 文件写入成功后，再更新进度（确保进度与文件状态同步）
+                            file_progress = progress_data["files"][file_key]
+                            
+                            # 只在块未标记为完成时添加
+                            if i not in file_progress["completed"]:
+                                file_progress["completed"].append(i)
+                                file_progress["completed_blocks"] += 1
+                                progress_data["meta"]["completed_blocks"] += 1
+                            
+                            file_progress["current_position"] = i
+                            
+                            # 检查文件是否已完成
+                            total_blocks = file_progress["total_blocks"]
+                            if total_blocks > 0:
+                                file_progress["is_completed"] = (file_progress["completed_blocks"] == total_blocks)
+                            else:
+                                file_progress["is_completed"] = True
+                            
+                            # 更新元数据中的完成文件计数
+                            if file_progress["is_completed"] and file_key not in completed_files:
+                                progress_data["meta"]["completed_files"] += 1
+                            
+                            # 更新最后修改时间
+                            progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            
+                            # 保存进度数据
+                            save_json(progress_data, PROGRESS_FILE)
+
+                            print(f"  💾 已保存 {filename}（进度 {i+1}/{len(blocks)}）")
+                    else:
+                        print(f"  ℹ️ 文件中没有需要翻译的内容: {filename}")
+                        # 仍然保存文件
+                        dest_path.write_text(original_content, encoding='utf-8')
                 else:
-                    print(f"  ℹ️ 文件中没有需要翻译的内容: {filename}")
-                    # 仍然保存文件
-                    dest_path.write_text(original_content, encoding='utf-8')
-            else:
-                # 非文本文件（如图片、CSS等），直接复制
-                print(f"  📁 复制非文本文件: {filename}")
-                import shutil
-                shutil.copy2(source_path, dest_path)
+                    # 非文本文件（如图片、CSS等），直接复制
+                    print(f"  📁 复制非文本文件: {filename}")
+                    import shutil
+                    shutil.copy2(source_path, dest_path)
+                    
+                    # 更新非文本文件的进度状态
+                    file_progress = progress_data["files"][file_key]
+                    file_progress["is_completed"] = True
+                    file_progress["total_blocks"] = 0
+                    file_progress["completed_blocks"] = 0
+                    file_progress["completed"] = []
+                    
+                    # 更新元数据
+                    if file_key not in completed_files:
+                        progress_data["meta"]["completed_files"] += 1
                 
-                # 更新非文本文件的进度状态
-                file_progress = progress_data["files"][file_key]
-                file_progress["is_completed"] = True
-                file_progress["total_blocks"] = 0
-                file_progress["completed_blocks"] = 0
-                file_progress["completed"] = []
+                # 更新最后修改时间
+                progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 
-                # 更新元数据
-                if file_key not in completed_files:
-                    progress_data["meta"]["completed_files"] += 1
-            
-            # 更新最后修改时间
-            progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-            
-            # 保存进度数据
-            save_json(progress_data, PROGRESS_FILE)
+                # 保存进度数据
+                save_json(progress_data, PROGRESS_FILE)
 
-            # 文件完成
-            completed_files.add(filename)
-            update_checklist(all_files, progress_data)
-            print(f"✅ 完成文件: {filename}")
+                # 文件完成
+                completed_files.add(filename)
+                update_checklist(all_files, progress_data)
+                print(f"✅ 完成文件: {filename}")
 
-        print("\n🎉 所有文件处理完毕！")
-        print(f"输出目录: {TRANSLATED_ROOT.absolute()}")
-    finally:
-        # 确保连接管理器被正确关闭
-        try:
-            if 'connection_manager' in locals():
-                await connection_manager.disconnect()
-                print("🔌 连接管理器已断开")
+                # 检查是否所有文件都已完成
+                if len(completed_files) == len(all_files):
+                    print("\n🎉 所有文件处理完毕！")
+                    print(f"输出目录: {TRANSLATED_ROOT.absolute()}")
+                    break  # 所有文件处理完毕，退出循环
+        except (SDKTimeoutError, ConnectionError) as e:
+            # 处理连接错误，需要重建连接管理器
+            print(f"  🚨 连接失败，尝试重建连接管理器: {e}")
+            if connection_manager:
+                try:
+                    await connection_manager.disconnect()
+                except:
+                    pass
+            connection_manager = None  # 重置连接管理器，触发重新创建
+            continue  # 继续循环，创建新的连接管理器
         except Exception as e:
-            print(f"⚠️ 断开连接管理器时出错: {e}")
-            pass  # 忽略关闭时的错误
-        
-        # 停止资源监控并输出统计信息
-        try:
-            if 'resource_monitor' in locals():
-                await resource_monitor.stop_monitoring()
-                
-                # 输出内存统计信息
-                memory_stats = resource_monitor.get_memory_stats()
-                if memory_stats:
-                    print(f"\n📊 资源使用统计:")
-                    print(f"  当前内存: {memory_stats['current_mb']:.1f}MB")
-                    print(f"  峰值内存: {memory_stats['peak_mb']:.1f}MB")
-                    print(f"  平均内存: {memory_stats['avg_mb']:.1f}MB")
-                    print(f"  最大限制: {memory_stats['max_memory_mb']:.1f}MB")
-                    print(f"  监控样本: {memory_stats['samples']} 个")
-                
-                print("📊 资源监控已停止")
-        except Exception as e:
-            print(f"⚠️ 停止资源监控时出错: {e}")
-            pass
-        
-        # 输出连接状态报告
-        try:
-            if 'enhanced_logger' in locals():
-                connection_report = enhanced_logger.get_connection_report()
-                print(f"\n{connection_report}")
-        except Exception as e:
-            print(f"⚠️ 生成连接报告时出错: {e}")
-            pass
+            # 处理其他异常，退出循环
+            print(f"  🚨 发生未预期的错误: {e}")
+            import traceback
+            traceback.print_exc()
+            break
+
+    # 确保连接管理器被正确关闭
+    try:
+        if connection_manager:
+            await connection_manager.disconnect()
+            print("🔌 连接管理器已断开")
+    except Exception as e:
+        print(f"⚠️ 断开连接管理器时出错: {e}")
+        pass  # 忽略关闭时的错误
+
+    # 停止资源监控并输出统计信息
+    try:
+        if 'resource_monitor' in locals():
+            await resource_monitor.stop_monitoring()
+            
+            # 输出内存统计信息
+            memory_stats = resource_monitor.get_memory_stats()
+            if memory_stats:
+                print(f"\n📊 资源使用统计:")
+                print(f"  当前内存: {memory_stats['current_mb']:.1f}MB")
+                print(f"  峰值内存: {memory_stats['peak_mb']:.1f}MB")
+                print(f"  平均内存: {memory_stats['avg_mb']:.1f}MB")
+                print(f"  最大限制: {memory_stats['max_memory_mb']:.1f}MB")
+                print(f"  监控样本: {memory_stats['samples']} 个")
+            
+            print("📊 资源监控已停止")
+    except Exception as e:
+        print(f"⚠️ 停止资源监控时出错: {e}")
+        pass
+
+    # 输出连接状态报告
+    try:
+        if 'enhanced_logger' in locals():
+            connection_report = enhanced_logger.get_connection_report()
+            print(f"\n{connection_report}")
+    except Exception as e:
+        print(f"⚠️ 生成连接报告时出错: {e}")
+        pass
 
 if __name__ == "__main__":
     try:
