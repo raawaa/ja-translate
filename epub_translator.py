@@ -1298,6 +1298,7 @@ def update_file_content_by_type_incremental(
         if original_block in current_content:
             # 实现双语对照：保留原文，添加译文
             bilingual_block = f'<div class="bilingual-container">{original_block}{translated_block}</div>'
+            print(f"  🔄 实现HTML双语对照: 替换原始块为双语块")
             return current_content.replace(original_block, bilingual_block, 1)
         else:
             # 如果直接替换失败，尝试使用文本内容匹配
@@ -1336,6 +1337,7 @@ def update_file_content_by_type_incremental(
                             bilingual_container.append(trans_tag)
                             # 替换原标签为双语对照容器
                             target_tag.replace_with(bilingual_container)
+                            print(f"  🔄 通过BeautifulSoup实现HTML双语对照")
                             return str(soup)
                 
                 # 如果所有方法都失败，记录警告但不修改内容
@@ -1347,7 +1349,7 @@ def update_file_content_by_type_incremental(
                 return current_content
     
     elif file_type == 'ncx':
-        # 对于NCX，提取翻译后的文本，替换原始的text标签内容
+        # 对于NCX，实现双语对照：保留原文，添加译文
         import re
         # 从翻译后的块中提取文本
         trans_match = re.search(r'<text>(.*?)</text>', translated_block)
@@ -1357,16 +1359,19 @@ def update_file_content_by_type_incremental(
             orig_match = re.search(r'<text>(.*?)</text>', original_block)
             if orig_match:
                 orig_text = orig_match.group(1)
+                # 实现双语对照：保留原文，添加译文
+                bilingual_text = f'<text>{orig_text} / {trans_text}</text>'
                 # 替换当前内容中的对应部分
+                print(f"  🔄 实现NCX双语对照: {orig_text} -> {trans_text}")
                 return current_content.replace(
                     f"<text>{orig_text}</text>",
-                    f"<text>{trans_text}</text>",
+                    bilingual_text,
                     1
                 )
         return current_content
     
     elif file_type == 'opf':
-        # 对于OPF，提取翻译后的文本，替换原始的标签内容
+        # 对于OPF，实现双语对照：保留原文，添加译文
         import re
         # 识别标签类型
         tag_match = re.search(r'<(\w+)>', original_block)
@@ -1380,10 +1385,13 @@ def update_file_content_by_type_incremental(
                 orig_match = re.search(f'<{tag_name}>(.*?)</{tag_name}>', original_block)
                 if orig_match:
                     orig_text = orig_match.group(1)
+                    # 实现双语对照：保留原文，添加译文
+                    bilingual_text = f'<{tag_name}>{orig_text} / {trans_text}</{tag_name}>'
                     # 替换当前内容中的对应部分
+                    print(f"  🔄 实现OPF双语对照: {tag_name}标签 - {orig_text} -> {trans_text}")
                     return current_content.replace(
                         f"<{tag_name}>{orig_text}</{tag_name}>",
-                        f"<{tag_name}>{trans_text}</{tag_name}>",
+                        bilingual_text,
                         1
                     )
         return current_content
