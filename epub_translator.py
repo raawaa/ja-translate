@@ -1296,7 +1296,9 @@ def update_file_content_by_type_incremental(
             
         # 对于HTML，先尝试直接替换
         if original_block in current_content:
-            return current_content.replace(original_block, translated_block, 1)
+            # 实现双语对照：保留原文，添加译文
+            bilingual_block = f'<div class="bilingual-container">{original_block}{translated_block}</div>'
+            return current_content.replace(original_block, bilingual_block, 1)
         else:
             # 如果直接替换失败，尝试使用文本内容匹配
             from bs4 import BeautifulSoup
@@ -1321,11 +1323,19 @@ def update_file_content_by_type_incremental(
                     if tags_found:
                         target_tag = tags_found[min(block_index, len(tags_found)-1)]
                         
-                        # 替换为翻译后的内容
+                        # 替换为双语对照结构
                         trans_soup = BeautifulSoup(translated_block, 'html.parser')
                         trans_tag = trans_soup.find()
                         if trans_tag:
-                            target_tag.replace_with(trans_tag)
+                            # 创建双语对照容器
+                            from bs4 import Tag
+                            bilingual_container = Tag(name='div')
+                            bilingual_container['class'] = ['bilingual-container']
+                            # 保留原文，添加译文
+                            bilingual_container.append(target_tag)
+                            bilingual_container.append(trans_tag)
+                            # 替换原标签为双语对照容器
+                            target_tag.replace_with(bilingual_container)
                             return str(soup)
                 
                 # 如果所有方法都失败，记录警告但不修改内容
