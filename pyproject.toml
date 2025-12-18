@@ -14,3 +14,4 @@ requires-python = ">=3.8"
 
 [project.scripts]
 translate = "epub_translator:main"
+pack = "epub_packer:main"
