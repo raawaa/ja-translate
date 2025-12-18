@@ -5,6 +5,9 @@
 __pycache__/
 *.pyc
 
+# 环境变量文件
+.env
+
 # 翻译过程文件
 error_log.json
 paragraph_progress.json
@@ -27,3 +30,6 @@ uv.lock
 # 系统文件
 .DS_Store
 Thumbs.db
+debug.log
+temp/connection_status.json
+temp/translation.log
