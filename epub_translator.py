@@ -1357,17 +1357,74 @@ def update_file_content_by_type_incremental(
         if translated_block is None:
             print(f"  ⚠️ 警告: translated_block为None，跳过替换")
             return current_content
+        
+        # 检查原始块是否已经包含bilingual-container，如果包含则跳过处理，避免嵌套
+        if 'bilingual-container' in original_block:
+            print(f"  ⚠️ 警告: 原始块已包含bilingual-container，跳过处理")
+            return current_content
+        
+        # 检查原始块是否已经被处理过（包含original-text或translated-text类）
+        if 'original-text' in original_block or 'translated-text' in original_block:
+            print(f"  ⚠️ 警告: 原始块已包含翻译相关类，跳过处理")
+            return current_content
             
         # 对于HTML，先尝试直接替换
         if original_block in current_content:
             # 实现双语对照：保留原文，添加译文，并添加样式类区分
             # 为原文添加 original-text 类
-            original_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', r'<\1\2 class="original-text">\3</\1>', original_block, flags=re.DOTALL | re.IGNORECASE)
+            # 修复正则表达式：正确处理已有class属性的情况
+            def add_class_to_tag(match):
+                tag_name = match.group(1)
+                attributes = match.group(2)
+                content = match.group(3)
+                
+                # 检查是否已有class属性
+                if 'class=' in attributes:
+                    # 提取已有class值
+                    class_match = re.search(r'class="([^"]*)"', attributes)
+                    if class_match:
+                        existing_classes = class_match.group(1)
+                        # 如果已有original-text类，则不重复添加
+                        if 'original-text' in existing_classes:
+                            return match.group(0)
+                        # 合并class属性
+                        new_classes = f"{existing_classes} original-text"
+                        # 修复引号嵌套问题
+                        new_class_attr = 'class="' + new_classes + '"'
+                        updated_attrs = attributes.replace(class_match.group(0), new_class_attr)
+                        return '<' + tag_name + updated_attrs + '>' + content + '</' + tag_name + '>'
+                # 没有class属性，直接添加
+                return f'<{tag_name}{attributes} class="original-text">{content}</{tag_name}>'
+            
+            original_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', add_class_to_tag, original_block, flags=re.DOTALL | re.IGNORECASE)
             if original_with_class == original_block:  # 如果没有匹配到标签
                 original_with_class = f'<div class="original-text">{original_block}</div>'
             
             # 为译文添加 translated-text 类
-            translated_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', r'<\1\2 class="translated-text">\3</\1>', translated_block, flags=re.DOTALL | re.IGNORECASE)
+            def add_translated_class_to_tag(match):
+                tag_name = match.group(1)
+                attributes = match.group(2)
+                content = match.group(3)
+                
+                # 检查是否已有class属性
+                if 'class=' in attributes:
+                    # 提取已有class值
+                    class_match = re.search(r'class="([^"]*)"', attributes)
+                    if class_match:
+                        existing_classes = class_match.group(1)
+                        # 如果已有translated-text类，则不重复添加
+                        if 'translated-text' in existing_classes:
+                            return match.group(0)
+                        # 合并class属性
+                        new_classes = f"{existing_classes} translated-text"
+                        # 修复引号嵌套问题
+                        new_class_attr = 'class="' + new_classes + '"'
+                        updated_attrs = attributes.replace(class_match.group(0), new_class_attr)
+                        return '<' + tag_name + updated_attrs + '>' + content + '</' + tag_name + '>'
+                # 没有class属性，直接添加
+                return f'<{tag_name}{attributes} class="translated-text">{content}</{tag_name}>'
+            
+            translated_with_class = re.sub(r'<([a-z0-9]+)([^>]*)>(.*)</\1>', add_translated_class_to_tag, translated_block, flags=re.DOTALL | re.IGNORECASE)
             if translated_with_class == translated_block:  # 如果没有匹配到标签
                 translated_with_class = f'<div class="translated-text">{translated_block}</div>'
             
