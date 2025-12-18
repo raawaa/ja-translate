@@ -1044,6 +1044,8 @@ async def translate_block(
     original_tag = ""
     tag_name = ""
     content_inside_tag = ""
+    leading_spaces = ""  # 初始化开头空格
+    trailing_spaces = ""  # 初始化结尾空格
     
     # 使用正则表达式提取标签和内容
     tag_match = re.match(r'<([a-z0-9]+)([^>]*)>(.*)</\1>$', current_block, re.DOTALL | re.IGNORECASE)
@@ -1053,6 +1055,12 @@ async def translate_block(
         original_tag = f"<{tag_name}{tag_attributes}>"  # 完整的开始标签
         closing_tag = f"</{tag_name}>"  # 结束标签
         content_inside_tag = tag_match.group(3)  # 标签内的内容
+        
+        # 提取并保存原始内容的前后空格
+        leading_spaces = re.match(r'^(\s+)', content_inside_tag, re.DOTALL)  # 开头空格
+        trailing_spaces = re.search(r'(\s+)$', content_inside_tag, re.DOTALL)  # 结尾空格
+        leading_spaces = leading_spaces.group(1) if leading_spaces else ""  # 保存开头空格
+        trailing_spaces = trailing_spaces.group(1) if trailing_spaces else ""  # 保存结尾空格
     
     # 构建术语提示
     glossary_text = ""
@@ -1218,8 +1226,9 @@ async def translate_block(
                 
                 # 如果提取到了原块标签，使用原标签包装
                 if original_tag and tag_name:
-                    response = f"{original_tag}{response}{closing_tag}"
+                    response = f"{original_tag}{leading_spaces}{response}{trailing_spaces}{closing_tag}"
                     print(f"  ✅ 使用原块标签包装: {original_tag.strip()}")
+                    print(f"  📝 恢复前后空格: 前 '{repr(leading_spaces)}', 后 '{repr(trailing_spaces)}'")
                 else:
                     # 默认使用<p>标签包装
                     response = f"<p>{response}</p>"
