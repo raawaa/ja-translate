@@ -43,7 +43,7 @@ TRANSLATED_DIR = TRANSLATED_ROOT  # 向后兼容：指向 translated
 TEMP_DIR = Path("temp")  # 过程性文件存放目录
 CHECKLIST_FILE = TEMP_DIR / "translate-checklist.md"
 GLOSSARY_FILE = "glossary.md"  # 术语表保持在根目录
-PROGRESS_FILE = TEMP_DIR / "paragraph_progress.json"
+PROGRESS_FILE = TEMP_DIR / "progress.json"
 ERROR_LOG_FILE = TEMP_DIR / "error_log.json"
 NEW_TERMS_FILE = TEMP_DIR / "new_terms.json"
 
@@ -868,9 +868,17 @@ def check_chinese_punctuation(text: str) -> bool:
             return False
     return True
 
-def update_checklist(file_list: List[str], completed_files: set):
+def update_checklist(file_list: List[str], progress_data: dict):
     """更新 translate-checklist.md"""
     content = "# 日文书籍翻译进度追踪\n\n"
+    
+    # 获取元数据
+    meta = progress_data.get("meta", {})
+    total_files = meta.get("total_files", len(file_list))
+    completed_files_count = meta.get("completed_files", 0)
+    total_blocks = meta.get("total_blocks", 0)
+    completed_blocks = meta.get("completed_blocks", 0)
+    last_updated = meta.get("last_updated", time.strftime("%Y-%m-%d %H:%M:%S"))
     
     # 按类型分组文件
     html_files = [f for f in file_list if f.endswith('.html')]
@@ -881,39 +889,67 @@ def update_checklist(file_list: List[str], completed_files: set):
     if html_files:
         content += "## HTML文件\n"
         for f in html_files:
-            mark = "x" if f in completed_files else " "
-            content += f"- [{mark}] {f}\n"
+            file_progress = progress_data.get("files", {}).get(f, {})
+            is_completed = file_progress.get("is_completed", False)
+            mark = "x" if is_completed else " "
+            
+            # 添加块级进度信息
+            if not is_completed:
+                completed_blocks_count = file_progress.get("completed_blocks", 0)
+                total_blocks_count = file_progress.get("total_blocks", 0)
+                if total_blocks_count > 0:
+                    block_progress = f" ({completed_blocks_count}/{total_blocks_count} 块)"
+                    content += f"- [{mark}] {f}{block_progress}\n"
+                else:
+                    content += f"- [{mark}] {f}\n"
+            else:
+                content += f"- [{mark}] {f}\n"
         content += "\n"
 
     if ncx_files:
         content += "## 目录文件\n"
         for f in ncx_files:
-            mark = "x" if f in completed_files else " "
+            file_progress = progress_data.get("files", {}).get(f, {})
+            is_completed = file_progress.get("is_completed", False)
+            mark = "x" if is_completed else " "
             content += f"- [{mark}] {f}\n"
         content += "\n"
 
     if opf_files:
         content += "## 元数据文件\n"
         for f in opf_files:
-            mark = "x" if f in completed_files else " "
+            file_progress = progress_data.get("files", {}).get(f, {})
+            is_completed = file_progress.get("is_completed", False)
+            mark = "x" if is_completed else " "
             content += f"- [{mark}] {f}\n"
         content += "\n"
 
     if other_files:
         content += "## 其他文件\n"
         for f in other_files:
-            mark = "x" if f in completed_files else " "
+            file_progress = progress_data.get("files", {}).get(f, {})
+            is_completed = file_progress.get("is_completed", True)  # 其他文件默认为已完成
+            mark = "x" if is_completed else " "
             content += f"- [{mark}] {f}\n"
         content += "\n"
 
     content += "## 翻译进度统计\n"
     total = len(file_list)
-    done = len(completed_files)
+    done = completed_files_count
     percent = done / total * 100 if total > 0 else 0
     content += f"- 总文件数: {total}个文件\n"
     content += f"- 已翻译: {done}个\n"
     content += f"- 待翻译: {total - done}个\n"
-    content += f"- 完成度: {percent:.1f}%\n"
+    content += f"- 文件完成度: {percent:.1f}%\n"
+    
+    # 添加块级进度统计
+    if total_blocks > 0:
+        block_percent = completed_blocks / total_blocks * 100 if total_blocks > 0 else 0
+        content += f"- 总文本块: {total_blocks}个\n"
+        content += f"- 已翻译块: {completed_blocks}个\n"
+        content += f"- 块完成度: {block_percent:.1f}%\n"
+    
+    content += f"- 最后更新时间: {last_updated}\n"
     
     with open(CHECKLIST_FILE, 'w', encoding='utf-8') as f:
         f.write(content)
@@ -1309,28 +1345,59 @@ async def main():
     print("📊 资源监控已启动")
 
     # 加载状态
-    progress = load_json(PROGRESS_FILE, {})
+    progress_data = load_json(PROGRESS_FILE, {})
     error_log = load_json(ERROR_LOG_FILE, {"errors": []})
     new_terms = load_json(NEW_TERMS_FILE, {"discovered_terms": []})
     glossary = load_glossary()
     
-    # 迁移现有进度数据：将简单文件名键转换为相对路径键
-    if progress:
-        new_progress = {}
-        for old_key, value in progress.items():
-            # 尝试在SOURCE_ROOT下查找文件
-            found = False
-            for file_path in SOURCE_ROOT.rglob(old_key):
-                if file_path.is_file():
-                    rel_path = file_path.relative_to(SOURCE_ROOT)
-                    new_progress[str(rel_path)] = value
-                    found = True
-                    break
-            if not found:
-                # 如果找不到，可能是文件不存在或路径已变化，丢弃该进度项
-                print(f"⚠️  进度数据迁移：未找到文件 '{old_key}'，丢弃其进度")
-        progress = new_progress
-        save_json(progress, PROGRESS_FILE)  # 立即保存迁移后的数据
+    # 初始化进度数据结构
+    if not progress_data or 'meta' not in progress_data:
+        progress_data = {
+            "meta": {
+                "total_files": 0,
+                "completed_files": 0,
+                "total_blocks": 0,
+                "completed_blocks": 0,
+                "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            },
+            "files": {}
+        }
+    
+    # 确保所有文件都有正确的字段和统计信息
+    completed_files_count = 0
+    total_blocks = 0
+    completed_blocks = 0
+    
+    for file_key, file_progress in progress_data["files"].items():
+        # 获取当前文件的块数信息
+        file_total_blocks = file_progress.get("total_blocks", 0)
+        file_completed = file_progress.get("completed", [])
+        file_completed_blocks = len(file_completed)
+        
+        # 更新总块数统计
+        total_blocks += file_total_blocks
+        completed_blocks += file_completed_blocks
+        
+        # 更新文件的块数信息
+        file_progress["completed_blocks"] = file_completed_blocks
+        
+        # 确定文件是否已完成
+        if file_total_blocks > 0:
+            file_progress["is_completed"] = (file_completed_blocks == file_total_blocks)
+        else:
+            file_progress["is_completed"] = True
+        
+        # 统计已完成文件
+        if file_progress["is_completed"]:
+            completed_files_count += 1
+    
+    # 更新元数据统计
+    total_files = len(progress_data["files"])
+    progress_data["meta"]["total_files"] = total_files
+    progress_data["meta"]["completed_files"] = completed_files_count
+    progress_data["meta"]["total_blocks"] = total_blocks
+    progress_data["meta"]["completed_blocks"] = completed_blocks
+    progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
     
     # 获取所有待翻译文件（递归遍历整个source目录）
     all_files = []    # 递归遍历整个 source/ 目录树
@@ -1346,10 +1413,18 @@ async def main():
     if not all_files:
         print("❌ 未找到 source/ 目录中的文件，请检查路径")
         return
+    
+    # 从进度数据中构建completed_files集合
     completed_files = set()
+    if progress_data and 'files' in progress_data:
+        for file_key, file_progress in progress_data["files"].items():
+            if file_progress.get("is_completed", False):
+                completed_files.add(file_key)
+    
+    # 初始化 checklist
+    update_checklist(all_files, progress_data)
+    
 
-    # 初始化 checklist（扩展后的逻辑）
-    update_checklist(all_files, completed_files)
 
     # 创建 IFlowConnectionManager 并使用重试机制处理连接问题
     connection_manager = await create_connection_manager_with_retry(
@@ -1433,15 +1508,31 @@ async def main():
             file_size = source_path.stat().st_size
             print(f"📦 文件大小: {file_size:,} 字节 ({file_size/1024:.1f} KB)")
 
+            # 初始化进度数据结构
+            if not progress_data:
+                progress_data = {
+                    "meta": {
+                        "total_files": 0,
+                        "completed_files": 0,
+                        "total_blocks": 0,
+                        "completed_blocks": 0,
+                        "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    },
+                    "files": {}
+                }
+            
             # 初始化文件进度
-            if file_key not in progress:
-                progress[file_key] = {
+            if file_key not in progress_data["files"]:
+                progress_data["files"][file_key] = {
                     "type": file_type,
                     "total_blocks": 0,
+                    "completed_blocks": 0,
                     "completed": [],
                     "failed": [],
-                    "current_position": 0
+                    "current_position": 0,
+                    "is_completed": False
                 }
+                progress_data["meta"]["total_files"] += 1
 
             # 根据文件类型决定如何处理
             if file_type in ['html', 'ncx', 'opf']:
@@ -1450,10 +1541,17 @@ async def main():
                 
                 # 根据文件类型提取可翻译块
                 blocks = extract_translatable_blocks_by_type(original_content, file_type)
-                progress[file_key]["total_blocks"] = len(blocks)
+                
+                # 更新总块数（如果有变化）
+                if progress_data["files"][file_key]["total_blocks"] != len(blocks):
+                    # 计算块数变化
+                    old_total = progress_data["files"][file_key]["total_blocks"]
+                    progress_data["files"][file_key]["total_blocks"] = len(blocks)
+                    progress_data["meta"]["total_blocks"] += (len(blocks) - old_total)
 
                 # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
-                if dest_path.exists() and len(progress[file_key]["completed"]) > 0:
+                completed_blocks = len(progress_data["files"][file_key]["completed"])
+                if dest_path.exists() and completed_blocks > 0:
                     print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
                     translated_content = dest_path.read_text(encoding='utf-8')
                     
@@ -1469,7 +1567,7 @@ async def main():
                     
                     # 对于已完成的块，保持为空字符串（会在增量更新时从文件中读取）
                     # 对于未完成的块，也保持为空字符串
-                    print(f"  📋 已完成 {len(progress[file_key]['completed'])} 个块，将在翻译时逐个更新")
+                    print(f"  📋 已完成 {completed_blocks} 个块，将在翻译时逐个更新")
                 else:
                     print(f"  🆕 首次翻译此文件")
                     translated_content = original_content
@@ -1480,14 +1578,14 @@ async def main():
                     # 逐块处理
                     block_start_time = time.time()
                     for i, block in enumerate(blocks):
-                        if i in progress[file_key]["completed"]:
+                        if i in progress_data["files"][file_key]["completed"]:
                             print(f"  ✅ 跳过已翻译块 {i+1}/{len(blocks)}")
                             # 如果块已翻译，从文件中恢复已翻译的块内容
                             translated_blocks[i] = block
                             continue
 
                         # 计算进度和预计时间
-                        completed_count = len(progress[file_key]["completed"])
+                        completed_count = len(progress_data["files"][file_key]["completed"])
                         remaining = len(blocks) - completed_count
                         if completed_count > 0:
                             elapsed = time.time() - block_start_time
@@ -1610,9 +1708,32 @@ async def main():
                             print(f"  ⚠️ 块 {i} 可能使用了日文标点")
 
                         # 文件写入成功后，再更新进度（确保进度与文件状态同步）
-                        progress[file_key]["completed"].append(i)
-                        progress[file_key]["current_position"] = i
-                        save_json(progress, PROGRESS_FILE)
+                        file_progress = progress_data["files"][file_key]
+                        
+                        # 只在块未标记为完成时添加
+                        if i not in file_progress["completed"]:
+                            file_progress["completed"].append(i)
+                            file_progress["completed_blocks"] += 1
+                            progress_data["meta"]["completed_blocks"] += 1
+                        
+                        file_progress["current_position"] = i
+                        
+                        # 检查文件是否已完成
+                        total_blocks = file_progress["total_blocks"]
+                        if total_blocks > 0:
+                            file_progress["is_completed"] = (file_progress["completed_blocks"] == total_blocks)
+                        else:
+                            file_progress["is_completed"] = True
+                        
+                        # 更新元数据中的完成文件计数
+                        if file_progress["is_completed"] and file_key not in completed_files:
+                            progress_data["meta"]["completed_files"] += 1
+                        
+                        # 更新最后修改时间
+                        progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        
+                        # 保存进度数据
+                        save_json(progress_data, PROGRESS_FILE)
 
                         print(f"  💾 已保存 {filename}（进度 {i+1}/{len(blocks)}）")
                 else:
@@ -1624,10 +1745,27 @@ async def main():
                 print(f"  📁 复制非文本文件: {filename}")
                 import shutil
                 shutil.copy2(source_path, dest_path)
+                
+                # 更新非文本文件的进度状态
+                file_progress = progress_data["files"][file_key]
+                file_progress["is_completed"] = True
+                file_progress["total_blocks"] = 0
+                file_progress["completed_blocks"] = 0
+                file_progress["completed"] = []
+                
+                # 更新元数据
+                if file_key not in completed_files:
+                    progress_data["meta"]["completed_files"] += 1
+            
+            # 更新最后修改时间
+            progress_data["meta"]["last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            # 保存进度数据
+            save_json(progress_data, PROGRESS_FILE)
 
             # 文件完成
             completed_files.add(filename)
-            update_checklist(all_files, completed_files)
+            update_checklist(all_files, progress_data)
             print(f"✅ 完成文件: {filename}")
 
         print("\n🎉 所有文件处理完毕！")

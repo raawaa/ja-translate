@@ -13,6 +13,9 @@ error_log.json
 paragraph_progress.json
 translate-checklist.md
 
+# 临时文件目录
+temp/
+
 # 输出目录（如果需要保留翻译结果可以注释掉）
 translated/
 
