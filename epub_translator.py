@@ -1098,9 +1098,6 @@ async def translate_block(
 
     for attempt in range(max_retries):
         try:
-            # 关键修改：每次翻译前重置会话
-            await connection_manager.reset_session()
-            
             # 显示要翻译的内容预览
             preview = re.sub(r'<[^>]+>', '', current_block)[:50]
             print(f"  📋 发送翻译请求 (尝试 {attempt+1}/{max_retries})")
@@ -1190,8 +1187,13 @@ async def translate_block(
                     
                     # 根据结束原因进行不同处理
                     try:
+                        session_reset_needed = False
                         if stop_reason == StopReason.MAX_TOKENS:
                             print(f"  ⚠️ 警告: 翻译结果可能被截断，因为达到了最大令牌限制")
+                            # 自动重置会话，确保后续翻译有充足的上下文空间
+                            print(f"  🔄 自动重置会话，为后续翻译准备充足的上下文空间")
+                            await connection_manager.reset_session()
+                            session_reset_needed = True
                         elif stop_reason == StopReason.END_TURN:
                             print(f"  📊 翻译正常完成")
                         else:
@@ -1199,8 +1201,13 @@ async def translate_block(
                     except (ValueError, TypeError):
                         # 如果 StopReason 不匹配，使用字符串比较作为备选
                         stop_reason_str = str(stop_reason).upper()
+                        session_reset_needed = False
                         if 'MAX_TOKENS' in stop_reason_str:
                             print(f"  ⚠️ 警告: 翻译结果可能被截断，因为达到了最大令牌限制")
+                            # 自动重置会话，确保后续翻译有充足的上下文空间
+                            print(f"  🔄 自动重置会话，为后续翻译准备充足的上下文空间")
+                            await connection_manager.reset_session()
+                            session_reset_needed = True
                         elif 'END_TURN' in stop_reason_str:
                             print(f"  📊 翻译正常完成")
                         else:
@@ -1212,12 +1219,21 @@ async def translate_block(
                     # 未知消息类型，记录但不影响流程
                     print(f"  📨 收到未知类型消息: {type(message).__name__}")
 
+            # 处理会话重置需求
+            if 'session_reset_needed' in locals() and session_reset_needed:
+                # 如果会话被重置，当前翻译可能不完整，需要重新尝试
+                print(f"  🔄 将重新翻译当前块以确保完整性")
+                if attempt < max_retries - 1:
+                    # 继续重试循环，重新翻译当前块
+                    await asyncio.sleep(1)  # 短暂等待，确保重置完成
+                    continue
+                else:
+                    print(f"  ⚠️ 警告: 达到最大重试次数，当前块可能翻译不完整")
+
             # 清理响应：只保留 HTML 块（简单策略）
             response = response.strip()
             if response.startswith("```") and response.endswith("```"):
                 response = "\n".join(response.split("\n")[1:-1])
-
-
 
             # 关键修改：处理纯文本翻译结果
             if response and "<" not in response:
