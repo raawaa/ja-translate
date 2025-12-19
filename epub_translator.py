@@ -820,13 +820,55 @@ def extract_translatable_blocks(html: str) -> List[str]:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
         elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
-        return [str(elem) for elem in elements]
+        
+        # 过滤空段落：跳过只包含<br/>或空白字符的段落
+        filtered_elements = []
+        for elem in elements:
+            # 获取元素内容，去除空白字符
+            content = elem.get_text(strip=True)
+            # 获取原始HTML内容，检查是否只包含<br/>标签
+            elem_html = str(elem)
+            
+            # 检查是否为空段落：
+            # 1. 内容为空（只包含空白字符）
+            # 2. 原始HTML只包含<br/>标签
+            # 3. 原始HTML只包含空白字符和<br/>标签
+            is_empty = False
+            if not content:
+                # 检查是否只包含<br/>标签
+                from bs4 import BeautifulSoup as bs
+                temp_soup = bs(elem_html, 'html.parser')
+                # 移除所有br标签
+                for br in temp_soup.find_all('br'):
+                    br.extract()
+                # 如果移除br标签后内容为空，则为空段落
+                if not temp_soup.get_text(strip=True):
+                    is_empty = True
+            
+            if not is_empty:
+                filtered_elements.append(elem_html)
+        
+        return filtered_elements
     except ImportError:
         # 如果没有安装BeautifulSoup，则使用正则表达式作为备选方案
         # 匹配 <p>, <h1>-<h6>, <div>（带 class 的常见正文容器）
         pattern = r'(<(p|h[1-6]|div)(?:\s[^>]*)?>.*?</\2>)'
         matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
-        return [m[0] for m in matches]
+        
+        # 过滤空段落
+        filtered_matches = []
+        for m in matches:
+            match_html = m[0]
+            # 使用正则表达式检查是否只包含<br/>或空白字符
+            # 移除所有<br/>标签
+            cleaned = re.sub(r'<br\s*/?>', '', match_html, flags=re.IGNORECASE)
+            # 移除所有标签，检查纯文本内容
+            text_only = re.sub(r'<[^>]+>', '', cleaned)
+            # 如果只包含空白字符，则为空段落
+            if text_only.strip():
+                filtered_matches.append(match_html)
+        
+        return filtered_matches
 
 def get_file_type(filename: str) -> str:
     """
