@@ -1394,6 +1394,28 @@ def update_file_content_by_type_incremental(
     """
     import re
     if file_type == 'html':
+        # 检查HTML文件是否已经引入了CSS文件
+        if 'bilingual.css' not in current_content:
+            # 在head标签中添加CSS引用
+            if '<head>' in current_content:
+                current_content = current_content.replace('<head>', '<head>\n<link rel="stylesheet" href="bilingual.css" type="text/css" />', 1)
+                print(f"  🔄 添加CSS引用: bilingual.css")
+            elif '<link' in current_content:
+                # 如果没有<head>标签，但有其他<link>标签，在第一个<link>标签后添加
+                link_pos = current_content.find('<link')
+                if link_pos != -1:
+                    # 找到第一个<link>标签的结束位置
+                    link_end = current_content.find('>', link_pos) + 1
+                    current_content = current_content[:link_end] + '\n<link rel="stylesheet" href="bilingual.css" type="text/css" />' + current_content[link_end:]
+                    print(f"  🔄 添加CSS引用: bilingual.css")
+            else:
+                # 如果没有<head>标签和<link>标签，在<html>标签后添加
+                html_pos = current_content.find('<html>')
+                if html_pos != -1:
+                    html_end = current_content.find('>', html_pos) + 1
+                    current_content = current_content[:html_end] + '<head>\n<link rel="stylesheet" href="bilingual.css" type="text/css" />\n</head>' + current_content[html_end:]
+                    print(f"  🔄 添加CSS引用和<head>标签: bilingual.css")
+        
         # 检查translated_block是否为None
         if translated_block is None:
             print(f"  ⚠️ 警告: translated_block为None，跳过替换")
@@ -1793,7 +1815,35 @@ async def main():
 
                 # 确保目标目录存在
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 检查并创建CSS文件（只在处理HTML文件时创建一次）
+                if file_type == 'html':
+                    bilingual_css_path = TRANSLATED_ROOT / "OEBPS/bilingual.css"
+                    if not bilingual_css_path.exists():
+                        print(f"📄 创建CSS文件: {bilingual_css_path}")
+                        # 创建CSS文件内容
+                        css_content = '''/* 双语对照样式 */
+/* 容器样式（保留类名，无样式） */
+.bilingual-container {
+    /* 容器样式可在后续扩展 */
+}
 
+/* 原文样式 - 淡化处理 */
+.original-text {
+    color: #666;
+}
+
+/* 译文样式（保留类名，无样式） */
+.translated-text {
+    /* 译文样式可在后续扩展 */
+}'''
+                        # 确保目录存在
+                        bilingual_css_path.parent.mkdir(parents=True, exist_ok=True)
+                        # 写入CSS内容
+                        with open(bilingual_css_path, 'w', encoding='utf-8') as f:
+                            f.write(css_content)
+                        print(f"✅ CSS文件创建成功")
+                
                 if not source_path.exists():
                     print(f"  ⚠️ 文件不存在，跳过")
                     continue
@@ -1833,18 +1883,18 @@ async def main():
                         progress_data["meta"]["total_blocks"] += (len(blocks) - old_total)
                         print(f"  🔄 更新文件块数: {old_total} → {len(blocks)}")
 
-                    # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
-                    completed_blocks = len(progress_data["files"][file_key]["completed"])
-                    if dest_path.exists() and completed_blocks > 0:
-                        print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
-                        translated_content = dest_path.read_text(encoding='utf-8')
-                        
-                        # 验证已翻译文件是否真的包含翻译内容
-                        sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
-                        if sample_jp_check:
-                            print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
-                            # 可以选择从原文重新开始，或继续尝试恢复
-                            # 这里选择继续，但会在后续翻译中覆盖日文部分
+                        # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
+                        completed_blocks = len(progress_data["files"][file_key]["completed"])
+                        if dest_path.exists() and completed_blocks > 0:
+                            print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
+                            translated_content = dest_path.read_text(encoding='utf-8')
+                            
+                            # 验证已翻译文件是否真的包含翻译内容
+                            sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
+                            if sample_jp_check:
+                                print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
+                                # 可以选择从原文重新开始，或继续尝试恢复
+                                # 这里选择继续，但会在后续翻译中覆盖日文部分
                         
                         # 初始化translated_blocks数组
                         translated_blocks = [""] * len(blocks)
