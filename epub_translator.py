@@ -948,9 +948,8 @@ def extract_translatable_blocks_opf(content: str) -> List[str]:
         for elem_name in elements_to_check:
             for elem in root.findall(f'.//{elem_name}', namespaces):
                 if elem.text and contains_japanese(elem.text):
-                    # 保留标签结构，便于后续替换
-                    tag_name = elem_name.split(':')[-1]  # 获取标签名（去掉命名空间前缀）
-                    block = f"<{tag_name}>{elem.text}</{tag_name}>"
+                    # 保留完整标签结构（包括命名空间前缀），便于后续替换
+                    block = f"<{elem_name}>{elem.text}</{elem_name}>"
                     translatable_blocks.append(block)
         
         return translatable_blocks
@@ -958,7 +957,7 @@ def extract_translatable_blocks_opf(content: str) -> List[str]:
         print(f"解析OPF文件时出错: {e}")
         # 备选方案：使用正则表达式
         import re
-        matches = re.findall(r'<(?:dc:)?(title|creator|subject|description|publisher|contributor)>([^<]*)</(?:dc:)?\1>', content)
+        matches = re.findall(r'<(dc:title|dc:creator|dc:subject|dc:description|dc:publisher|dc:contributor)>([^<]*)</\1>', content)
         blocks = []
         for tag, content in matches:
             if contains_japanese(content):
@@ -1560,24 +1559,24 @@ def update_file_content_by_type_incremental(
     elif file_type == 'opf':
         # 对于OPF，实现双语对照：保留原文，添加译文
         import re
-        # 识别标签类型
-        tag_match = re.search(r'<(\w+)>', original_block)
+        # 识别标签类型，支持带有命名空间前缀的标签
+        tag_match = re.search(r'<([\w:]+)>', original_block)
         if tag_match:
-            tag_name = tag_match.group(1)
+            full_tag_name = tag_match.group(1)  # 保留完整标签名（包括命名空间前缀）
             # 从翻译后的块中提取文本
-            trans_match = re.search(f'<{tag_name}>(.*?)</{tag_name}>', translated_block)
+            trans_match = re.search(f'<{full_tag_name}>(.*?)</{full_tag_name}>', translated_block)
             if trans_match:
                 trans_text = trans_match.group(1)
                 # 从原始块中提取原始文本
-                orig_match = re.search(f'<{tag_name}>(.*?)</{tag_name}>', original_block)
+                orig_match = re.search(f'<{full_tag_name}>(.*?)</{full_tag_name}>', original_block)
                 if orig_match:
                     orig_text = orig_match.group(1)
                     # 实现双语对照：保留原文，添加译文
-                    bilingual_text = f'<{tag_name}>{orig_text} / {trans_text}</{tag_name}>'
+                    bilingual_text = f'<{full_tag_name}>{orig_text} / {trans_text}</{full_tag_name}>'
                     # 替换当前内容中的对应部分
-                    print(f"  🔄 实现OPF双语对照: {tag_name}标签 - {orig_text} -> {trans_text}")
+                    print(f"  🔄 实现OPF双语对照: {full_tag_name}标签 - {orig_text} -> {trans_text}")
                     return current_content.replace(
-                        f"<{tag_name}>{orig_text}</{tag_name}>",
+                        f"<{full_tag_name}>{orig_text}</{full_tag_name}>",
                         bilingual_text,
                         1
                     )
