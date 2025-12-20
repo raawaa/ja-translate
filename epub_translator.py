@@ -820,13 +820,55 @@ def extract_translatable_blocks(html: str) -> List[str]:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
         elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
-        return [str(elem) for elem in elements]
+        
+        # 过滤空段落：跳过只包含<br/>或空白字符的段落
+        filtered_elements = []
+        for elem in elements:
+            # 获取元素内容，去除空白字符
+            content = elem.get_text(strip=True)
+            # 获取原始HTML内容，检查是否只包含<br/>标签
+            elem_html = str(elem)
+            
+            # 检查是否为空段落：
+            # 1. 内容为空（只包含空白字符）
+            # 2. 原始HTML只包含<br/>标签
+            # 3. 原始HTML只包含空白字符和<br/>标签
+            is_empty = False
+            if not content:
+                # 检查是否只包含<br/>标签
+                from bs4 import BeautifulSoup as bs
+                temp_soup = bs(elem_html, 'html.parser')
+                # 移除所有br标签
+                for br in temp_soup.find_all('br'):
+                    br.extract()
+                # 如果移除br标签后内容为空，则为空段落
+                if not temp_soup.get_text(strip=True):
+                    is_empty = True
+            
+            if not is_empty:
+                filtered_elements.append(elem_html)
+        
+        return filtered_elements
     except ImportError:
         # 如果没有安装BeautifulSoup，则使用正则表达式作为备选方案
         # 匹配 <p>, <h1>-<h6>, <div>（带 class 的常见正文容器）
         pattern = r'(<(p|h[1-6]|div)(?:\s[^>]*)?>.*?</\2>)'
         matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
-        return [m[0] for m in matches]
+        
+        # 过滤空段落
+        filtered_matches = []
+        for m in matches:
+            match_html = m[0]
+            # 使用正则表达式检查是否只包含<br/>或空白字符
+            # 移除所有<br/>标签
+            cleaned = re.sub(r'<br\s*/?>', '', match_html, flags=re.IGNORECASE)
+            # 移除所有标签，检查纯文本内容
+            text_only = re.sub(r'<[^>]+>', '', cleaned)
+            # 如果只包含空白字符，则为空段落
+            if text_only.strip():
+                filtered_matches.append(match_html)
+        
+        return filtered_matches
 
 def get_file_type(filename: str) -> str:
     """
@@ -906,9 +948,8 @@ def extract_translatable_blocks_opf(content: str) -> List[str]:
         for elem_name in elements_to_check:
             for elem in root.findall(f'.//{elem_name}', namespaces):
                 if elem.text and contains_japanese(elem.text):
-                    # 保留标签结构，便于后续替换
-                    tag_name = elem_name.split(':')[-1]  # 获取标签名（去掉命名空间前缀）
-                    block = f"<{tag_name}>{elem.text}</{tag_name}>"
+                    # 保留完整标签结构（包括命名空间前缀），便于后续替换
+                    block = f"<{elem_name}>{elem.text}</{elem_name}>"
                     translatable_blocks.append(block)
         
         return translatable_blocks
@@ -916,7 +957,7 @@ def extract_translatable_blocks_opf(content: str) -> List[str]:
         print(f"解析OPF文件时出错: {e}")
         # 备选方案：使用正则表达式
         import re
-        matches = re.findall(r'<(?:dc:)?(title|creator|subject|description|publisher|contributor)>([^<]*)</(?:dc:)?\1>', content)
+        matches = re.findall(r'<(dc:title|dc:creator|dc:subject|dc:description|dc:publisher|dc:contributor)>([^<]*)</\1>', content)
         blocks = []
         for tag, content in matches:
             if contains_japanese(content):
@@ -1353,6 +1394,28 @@ def update_file_content_by_type_incremental(
     """
     import re
     if file_type == 'html':
+        # 检查HTML文件是否已经引入了CSS文件
+        if 'bilingual.css' not in current_content:
+            # 在head标签中添加CSS引用
+            if '<head>' in current_content:
+                current_content = current_content.replace('<head>', '<head>\n<link rel="stylesheet" href="bilingual.css" type="text/css" />', 1)
+                print(f"  🔄 添加CSS引用: bilingual.css")
+            elif '<link' in current_content:
+                # 如果没有<head>标签，但有其他<link>标签，在第一个<link>标签后添加
+                link_pos = current_content.find('<link')
+                if link_pos != -1:
+                    # 找到第一个<link>标签的结束位置
+                    link_end = current_content.find('>', link_pos) + 1
+                    current_content = current_content[:link_end] + '\n<link rel="stylesheet" href="bilingual.css" type="text/css" />' + current_content[link_end:]
+                    print(f"  🔄 添加CSS引用: bilingual.css")
+            else:
+                # 如果没有<head>标签和<link>标签，在<html>标签后添加
+                html_pos = current_content.find('<html>')
+                if html_pos != -1:
+                    html_end = current_content.find('>', html_pos) + 1
+                    current_content = current_content[:html_end] + '<head>\n<link rel="stylesheet" href="bilingual.css" type="text/css" />\n</head>' + current_content[html_end:]
+                    print(f"  🔄 添加CSS引用和<head>标签: bilingual.css")
+        
         # 检查translated_block是否为None
         if translated_block is None:
             print(f"  ⚠️ 警告: translated_block为None，跳过替换")
@@ -1544,24 +1607,24 @@ def update_file_content_by_type_incremental(
     elif file_type == 'opf':
         # 对于OPF，实现双语对照：保留原文，添加译文
         import re
-        # 识别标签类型
-        tag_match = re.search(r'<(\w+)>', original_block)
+        # 识别标签类型，支持带有命名空间前缀的标签
+        tag_match = re.search(r'<([\w:]+)>', original_block)
         if tag_match:
-            tag_name = tag_match.group(1)
+            full_tag_name = tag_match.group(1)  # 保留完整标签名（包括命名空间前缀）
             # 从翻译后的块中提取文本
-            trans_match = re.search(f'<{tag_name}>(.*?)</{tag_name}>', translated_block)
+            trans_match = re.search(f'<{full_tag_name}>(.*?)</{full_tag_name}>', translated_block)
             if trans_match:
                 trans_text = trans_match.group(1)
                 # 从原始块中提取原始文本
-                orig_match = re.search(f'<{tag_name}>(.*?)</{tag_name}>', original_block)
+                orig_match = re.search(f'<{full_tag_name}>(.*?)</{full_tag_name}>', original_block)
                 if orig_match:
                     orig_text = orig_match.group(1)
                     # 实现双语对照：保留原文，添加译文
-                    bilingual_text = f'<{tag_name}>{orig_text} / {trans_text}</{tag_name}>'
+                    bilingual_text = f'<{full_tag_name}>{orig_text} / {trans_text}</{full_tag_name}>'
                     # 替换当前内容中的对应部分
-                    print(f"  🔄 实现OPF双语对照: {tag_name}标签 - {orig_text} -> {trans_text}")
+                    print(f"  🔄 实现OPF双语对照: {full_tag_name}标签 - {orig_text} -> {trans_text}")
                     return current_content.replace(
-                        f"<{tag_name}>{orig_text}</{tag_name}>",
+                        f"<{full_tag_name}>{orig_text}</{full_tag_name}>",
                         bilingual_text,
                         1
                     )
@@ -1789,7 +1852,35 @@ async def main():
 
                 # 确保目标目录存在
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 检查并创建CSS文件（只在处理HTML文件时创建一次）
+                if file_type == 'html':
+                    bilingual_css_path = TRANSLATED_ROOT / "OEBPS/bilingual.css"
+                    if not bilingual_css_path.exists():
+                        print(f"📄 创建CSS文件: {bilingual_css_path}")
+                        # 创建CSS文件内容
+                        css_content = '''/* 双语对照样式 */
+/* 容器样式（保留类名，无样式） */
+.bilingual-container {
+    /* 容器样式可在后续扩展 */
+}
 
+/* 原文样式 - 淡化处理 */
+.original-text {
+    color: #666;
+}
+
+/* 译文样式（保留类名，无样式） */
+.translated-text {
+    /* 译文样式可在后续扩展 */
+}'''
+                        # 确保目录存在
+                        bilingual_css_path.parent.mkdir(parents=True, exist_ok=True)
+                        # 写入CSS内容
+                        with open(bilingual_css_path, 'w', encoding='utf-8') as f:
+                            f.write(css_content)
+                        print(f"✅ CSS文件创建成功")
+                
                 if not source_path.exists():
                     print(f"  ⚠️ 文件不存在，跳过")
                     continue
@@ -1829,18 +1920,18 @@ async def main():
                         progress_data["meta"]["total_blocks"] += (len(blocks) - old_total)
                         print(f"  🔄 更新文件块数: {old_total} → {len(blocks)}")
 
-                    # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
-                    completed_blocks = len(progress_data["files"][file_key]["completed"])
-                    if dest_path.exists() and completed_blocks > 0:
-                        print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
-                        translated_content = dest_path.read_text(encoding='utf-8')
-                        
-                        # 验证已翻译文件是否真的包含翻译内容
-                        sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
-                        if sample_jp_check:
-                            print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
-                            # 可以选择从原文重新开始，或继续尝试恢复
-                            # 这里选择继续，但会在后续翻译中覆盖日文部分
+                        # 准备目标内容：如果已有部分翻译，从翻译文件读取；否则从原文开始
+                        completed_blocks = len(progress_data["files"][file_key]["completed"])
+                        if dest_path.exists() and completed_blocks > 0:
+                            print(f"  🔄 检测到部分翻译进度，从已翻译文件恢复")
+                            translated_content = dest_path.read_text(encoding='utf-8')
+                            
+                            # 验证已翻译文件是否真的包含翻译内容
+                            sample_jp_check = contains_japanese(translated_content[:500])  # 检查前500字符
+                            if sample_jp_check:
+                                print(f"  ⚠️ 警告：已翻译文件似乎仍包含大量日文，可能需要重新翻译")
+                                # 可以选择从原文重新开始，或继续尝试恢复
+                                # 这里选择继续，但会在后续翻译中覆盖日文部分
                         
                         # 初始化translated_blocks数组
                         translated_blocks = [""] * len(blocks)
